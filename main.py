@@ -12,6 +12,7 @@ from data_loader import get_loader
 from utils import *
 
 from model import Generator, Discriminator
+import time
 
 def main():
     parser = argparse.ArgumentParser()
@@ -39,8 +40,8 @@ def main():
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--mode', type=str, default='test', choices=['train', 'test'])
 
-    parser.add_argument('--celeba_image_dir', type=str, default='../img_align_celeba')
-    parser.add_argument('--attr_path', type=str, default='../list_attr_celeba.txt')
+    parser.add_argument('--celeba_image_dir', type=str, default='./data/celeba/images')
+    parser.add_argument('--attr_path', type=str, default='./list_attr_celeba.txt')
     parser.add_argument('--model_save_dir', type=str, default='stargan_celeba_256/models')
     parser.add_argument('--result_dir', type=str, default='results')
 
@@ -48,11 +49,14 @@ def main():
 
     os.makedirs(config.result_dir, exist_ok=True)
 
+    t = time.time()
     celeba_loader = get_loader(config.celeba_image_dir, config.attr_path, config.selected_attrs,
                                config.celeba_crop_size, config.image_size, config.batch_size,
                                'CelebA', config.mode, config.num_workers)
+    print(f"************Load dataset: {time.time() - t}")
 
     # starganconfig.
+    t = time.time()
     G = Generator(config.g_conv_dim, config.c_dim, config.g_repeat_num)
     D = Discriminator(config.image_size, config.d_conv_dim, config.c_dim, config.d_repeat_num)
     G.cuda()
@@ -65,9 +69,11 @@ def main():
     load_model_weights(G, G_path)
     D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
     print("loading model successful")
+    print(f"************Generation Model: {time.time() - t}")
 
     l2_error, ssim, psnr = 0.0, 0.0, 0.0
     n_samples, n_dist = 0, 0
+    t_loop = time.time()
     for i, (x_real, c_org) in enumerate(celeba_loader):
         # Prepare input images and target domain labels.
         x_real = x_real.cuda()
@@ -76,7 +82,9 @@ def main():
         x_fake_list = [x_real]
 
         #generate adv in lab space
+        t = time.time()
         x_adv, pert = lab_attack(x_real, c_trg_list, G, iter=config.attack_iters)
+        print(f"************LAB Attack {i}th: {time.time() - t}")
 
         x_fake_list.append(x_adv)
 
@@ -108,8 +116,9 @@ def main():
         x_concat = torch.cat(x_fake_list, dim=3)
         result_path = os.path.join(config.result_dir, '{}-images.jpg'.format(i + 1))
         save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
-        if i == 50:  # stop after this many images
+        if i >= 50:  # stop after this many images
             break
+    print(f"************LAB Attack & Calulate: {time.time() - t_loop}")
 
     # Print metrics
     print('{} images.L2 error: {}. ssim: {}. psnr: {}. n_dist: {}'.format(n_samples,
@@ -119,4 +128,8 @@ def main():
                                                                     float(n_dist) / n_samples))
 
 if __name__ == '__main__':
+    start_time = time.time()
     main()
+    end_time = time.time()
+    total = end_time-start_time
+    print(f"************main: {total}") 

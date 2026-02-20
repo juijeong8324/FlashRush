@@ -5,4 +5,4 @@ opencv-python
 tqdm
 future
 scikit-image
-
+mpi4py

@@ -7,21 +7,28 @@ from skimage.metrics import peak_signal_noise_ratio
 from skimage.metrics import structural_similarity
 
 from color_space import *
+from mpi4py import MPI
+import time
+
 
 def load_model_weights(model, path):
-    pretrained_dict = torch.load(path, map_location=lambda storage, loc: storage)
+    pretrained_dict = torch.load(
+        path, map_location=lambda storage, loc: storage)
     model_dict = model.state_dict()
     # 1. filter out unnecessary keys
-    pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'preprocessing' not in k}
+    pretrained_dict = {
+        k: v for k, v in pretrained_dict.items() if 'preprocessing' not in k}
     # 2. overwrite entries in the existing state dict
     model_dict.update(pretrained_dict)
     # 3. load the new state dict
     model.load_state_dict(pretrained_dict, strict=False)
 
+
 def denorm(x):
     """Convert the range from [-1, 1] to [0, 1]."""
     out = (x + 1) / 2
     return out.clamp_(0, 1)
+
 
 def label2onehot(labels, dim):
     """Convert label indices to one-hot vectors."""
@@ -29,6 +36,7 @@ def label2onehot(labels, dim):
     out = torch.zeros(batch_size, dim)
     out[np.arange(batch_size), labels.long()] = 1
     return out
+
 
 def create_labels(c_org, c_dim=5, dataset='CelebA', selected_attrs=None):
     """Generate target domain labels for debugging and testing."""
@@ -56,13 +64,14 @@ def create_labels(c_org, c_dim=5, dataset='CelebA', selected_attrs=None):
         c_trg_list.append(c_trg.cuda())
     return c_trg_list
 
+
 def random_transform(img):
     T_list = [
         T.RandomHorizontalFlip(p=0.5),
         #T.RandomErasing(p=1, scale=(0.03, 0.10)),
         T.RandomRotation(degrees=(-15, 15)),
         T.RandomVerticalFlip(p=0.5),
-        T.RandomCrop((192,192)),
+        T.RandomCrop((192, 192)),
     ]
 
     T_compose = T.Compose([
@@ -72,22 +81,29 @@ def random_transform(img):
 
     return T_compose(img)
 
-def compare(img1,img2):
+
+def compare(img1, img2):
     """input tensor, translate to np.array"""
     img1_np = img1.squeeze(0).cpu().numpy()
     img2_np = img2.squeeze(0).cpu().numpy()
     img1_np = np.transpose(img1_np, (1, 2, 0))
     img2_np = np.transpose(img2_np, (1, 2, 0))
 
-    ssim = structural_similarity(img1_np,img2_np,multichannel=True)
-    psnr = peak_signal_noise_ratio(img1_np,img2_np)
+    min_size = min(img1_np.shape[:2])
+    win_size = min(7, min_size) if min_size >= 7 else 3
+
+    ssim = structural_similarity(
+        img1_np, img2_np, win_size=win_size, channel_axis=-1, data_range=1.0)
+    psnr = peak_signal_noise_ratio(img1_np, img2_np)
 
     return ssim, psnr
 
-def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter = 100):
+
+def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter=100):
 
     criterion = nn.MSELoss().cuda()
-    pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda().requires_grad_()
+    pert_a = torch.zeros(
+        X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda().requires_grad_()
 
     optimizer = torch.optim.Adam([pert_a], lr=1e-4, betas=(0.9, 0.999))
 
@@ -99,14 +115,16 @@ def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter = 100):
         X_lab = rgb2lab(X).cuda()
         pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
         X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert
-        X_new = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])(lab2rgb(X_lab))
+        X_new = T.Normalize(mean=[0.5, 0.5, 0.5], std=[
+                            0.5, 0.5, 0.5])(lab2rgb(X_lab))
 
         #X_new = random_transform(X_new)
 
         with torch.no_grad():
-            gen_noattack, gen_feats_noattack = model(X_nat, c_trg[i%len(c_trg)])
+            gen_noattack, gen_feats_noattack = model(
+                X_nat, c_trg[i % len(c_trg)])
 
-        gen_stargan, gen_feats_stargan = model(X_new, c_trg[i%5])
+        gen_stargan, gen_feats_stargan = model(X_new, c_trg[i % 5])
 
         loss = -criterion(gen_stargan, gen_noattack)
 
@@ -117,3 +135,120 @@ def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter = 100):
     return X_new, X_new - X
 
 
+def lab_attack2(X_nat, c_trg, device, model, epsilon=0.05, iter=100):
+    criterion = nn.MSELoss().to(device)
+    pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).to(
+        device).requires_grad_()
+
+    optimizer = torch.optim.Adam([pert_a], lr=1e-4, betas=(0.9, 0.999))
+
+    r = torch.ones_like(pert_a)
+
+    X = denorm(X_nat.clone()).to(device)
+
+    for i in range(iter):
+        X_lab = rgb2lab(X).to(device)
+        pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
+        X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert
+        X_new = T.Normalize(mean=[0.5, 0.5, 0.5], std=[
+                            0.5, 0.5, 0.5])(lab2rgb(X_lab))
+
+        #X_new = random_transform(X_new)
+
+        with torch.no_grad():
+            gen_noattack, gen_feats_noattack = model(
+                X_nat, c_trg[i % len(c_trg)])
+
+        gen_stargan, gen_feats_stargan = model(X_new, c_trg[i % 5])
+
+        loss = -criterion(gen_stargan, gen_noattack)
+        if torch.isnan(loss):
+            print(f"Iteration {i}: NaN detected in loss. Exiting loop.")
+            break
+
+        optimizer.zero_grad()
+        loss.backward()
+        if torch.isnan(pert_a.grad).any():
+            pert_a.grad = torch.nan_to_num(pert_a.grad, nan=0.0)
+        torch.nn.utils.clip_grad_norm_([pert_a], max_norm=1.0)
+        optimizer.step()
+
+    return X_new, X_new - X
+
+
+def lab_attack3(X_nat, c_trg, device, model, epsilon=0.05, iter=100):
+    # Initialize MPI
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    criterion = nn.MSELoss().to(device)
+    pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).to(
+        device).requires_grad_()
+
+    optimizer = torch.optim.Adam([pert_a], lr=1e-4, betas=(0.9, 0.999))
+
+    r = torch.ones_like(pert_a)
+
+    X = denorm(X_nat.clone()).to(device)
+    for i in range(iter):
+        if i % size != rank:
+            continue
+        X_lab = rgb2lab(X).to(device)
+        pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
+        X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert
+        X_new = T.Normalize(mean=[0.5, 0.5, 0.5], std=[
+                            0.5, 0.5, 0.5])(lab2rgb(X_lab))
+
+        #X_new = random_transform(X_new)
+
+        with torch.no_grad():
+            gen_noattack, gen_feats_noattack = model(
+                X_nat, c_trg[i % len(c_trg)])
+
+        gen_stargan, gen_feats_stargan = model(X_new, c_trg[i % 5])
+
+        loss = -criterion(gen_stargan, gen_noattack)
+        if torch.isnan(loss):
+            print(f"Iteration {i}: NaN detected in loss. Exiting loop.")
+            break
+
+        optimizer.zero_grad()
+        loss.backward()
+        if torch.isnan(pert_a.grad).any():
+            pert_a.grad = torch.nan_to_num(pert_a.grad, nan=0.0)
+        torch.nn.utils.clip_grad_norm_([pert_a], max_norm=1.0)
+        optimizer.step()
+
+    # --- Share final pert_a from all nodes and compute average ---
+    pert_a_cpu = pert_a.detach().cpu().numpy()
+    if rank == 0:
+        all_pert = np.empty((size, *pert_a_cpu.shape), dtype=pert_a_cpu.dtype)
+    else:
+        all_pert = None
+    t_mpi = time.time()
+    t_gather = time.time()
+    comm.Gather(pert_a_cpu, all_pert, root=0)
+    print(f"************MPI Gather rank{rank}: {time.time() - t_gather}")
+
+    # Compute average perturbation on Rank 0 and broadcast to all nodes
+    t_bcast = time.time()
+    if rank == 0:
+        avg_pert = np.mean(all_pert, axis=0)
+        print("\n--- Averaged Perturbation on Rank 0 ---")
+        print(avg_pert)
+    else:
+        avg_pert = None
+    avg_pert = comm.bcast(avg_pert, root=0)
+    print(f"************MPI Bcast rank{rank}: {time.time() - t_bcast}")
+    print(f"************MPI 전체 overhead rank{rank}: {time.time() - t_mpi}")
+    avg_pert = torch.tensor(avg_pert).to(device)
+
+    # Reapply average perturbation to X_nat to compute final perturbed image
+    X_lab_final = rgb2lab(X).to(device)
+    pert_final = torch.clamp(avg_pert, min=-epsilon, max=epsilon)
+    X_lab_final[:, 1:, :, :] = X_lab_final[:, 1:, :, :] + pert_final
+    X_new_final = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])(
+        lab2rgb(X_lab_final, device))
+
+    return X_new_final, X_new_final - X
