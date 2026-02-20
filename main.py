@@ -116,7 +116,7 @@ def main():
         x_concat = torch.cat(x_fake_list, dim=3)
         result_path = os.path.join(config.result_dir, '{}-images.jpg'.format(i + 1))
         save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
-        if i >= 50:  # stop after this many images
+        if i >= 49:  # stop after this many images
             break
     print(f"************LAB Attack & Calulate: {time.time() - t_loop}")
 
