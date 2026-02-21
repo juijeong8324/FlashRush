@@ -62,7 +62,7 @@ def main():
     parser.add_argument('--celeba_image_dir', type=str,
                         default='./data/celeba/images')
     parser.add_argument('--attr_path', type=str,
-                        default='./list_attr_celeba.txt')
+                        default='./data/celeba/list_attr_celeba.txt')
     parser.add_argument('--model_save_dir', type=str,
                         default='stargan_celeba_256/models')
     parser.add_argument('--result_dir', type=str, default='results')
@@ -161,7 +161,7 @@ def main():
         result_path = os.path.join(
             config.result_dir, '{}-images.jpg'.format(i + 1))
         save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
-        if i >= 49:  # stop after this many images
+        if i >= 1:  # stop after this many images
             break
     
     print(f"************LAB Attack & Calulate rank {rank}: {time.time() - t_loop}")

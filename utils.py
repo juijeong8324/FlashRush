@@ -106,11 +106,15 @@ def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter=100):
         gen_stargan, gen_feats_stargan = model(X_new, c_trg[i % 5])
 
         loss = -criterion(gen_stargan, gen_noattack)
+        if torch.isnan(loss):
+            print(f"Iteration {i}: NaN detected in loss. Exiting loop.")
+            break
 
         optimizer.zero_grad()
         loss.backward()
+        if torch.isnan(pert_a.grad).any():
+            pert_a.grad = torch.nan_to_num(pert_a.grad, nan=0.0)
         optimizer.step()
-
     return X_new, X_new - X
 
 
