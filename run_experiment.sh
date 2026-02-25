@@ -3,10 +3,11 @@
 SCRIPT=${1:-main}   # main | main2 | main3
 
 # main은 baseline (MPI 없음), main2/main3은 MPI
+# 기존 뉴런환경과 비교하기 위함
 if [ "$SCRIPT" = "main" ]; then
-    RUN_PREFIX="python3"
+    RUN_PREFIX="taskset -c 0,1 python3"
 else
-    RUN_PREFIX="mpirun -np 2 python3"
+    RUN_PREFIX="taskset -c 0,1 mpirun -np 2 python3"
 fi
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -34,7 +35,7 @@ $RUN_PREFIX ${SCRIPT}.py \
   --test_iters 200000 \
   --attack_iters 100 \
   --batch_size 1 \
-  2>&1 | tee "${LOG_DIR}/result.txt"
+  > "${LOG_DIR}/result.txt" 2>&1
 
 kill $GPU_PID $CPU_PID 2>/dev/null
 
