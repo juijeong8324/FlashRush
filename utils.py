@@ -154,7 +154,6 @@ def lab_attack2(X_nat, c_trg, device, model, epsilon=0.05, iter=100):
 
     return X_new, X_new - X
 
-
 def lab_attack3(X_nat, c_trg, device, model, epsilon=0.05, iter=100):
     # Initialize MPI
     comm = MPI.COMM_WORLD
@@ -227,3 +226,74 @@ def lab_attack3(X_nat, c_trg, device, model, epsilon=0.05, iter=100):
         lab2rgb(X_lab_final, device))
 
     return X_new_final, X_new_final - X
+
+
+
+def fgsm_lab_attack(X_nat, c_trg, model, epsilon=0.05):
+    criterion = nn.MSELoss().cuda()
+    X = denorm(X_nat.clone())
+
+    # Random init
+    pert_a = torch.empty(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda().uniform_(-epsilon, epsilon).requires_grad_(True)
+
+    # Gradient
+    X_lab = rgb2lab(X).cuda()
+    pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
+    X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert
+    X_lab = torch.clamp(X_lab, min=-128, max=128)
+    X_new = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])(lab2rgb(X_lab))
+
+    with torch.no_grad():
+        gen_noattack, _ = model(X_nat, c_trg[0])
+
+    gen_adv, _ = model(X_new, c_trg[0])
+    loss = criterion(gen_adv, gen_noattack)
+    loss.backward()
+
+    # One step and result
+    with torch.no_grad():
+        pert_sign = epsilon * pert_a.grad.sign()
+        pert_final = torch.clamp(pert_a.detach() + pert_sign, min=-epsilon, max=epsilon)
+        X_lab_final = rgb2lab(X).cuda()
+        X_lab_final[:, 1:, :, :] = X_lab_final[:, 1:, :, :] + pert_final
+        X_lab_final = torch.clamp(X_lab_final, min=-128, max=128)
+        X_adv = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])(lab2rgb(X_lab_final))
+
+    return X_adv, X_adv - X
+
+
+def pgd_lab_attack(X_nat, c_trg, model, epsilon=0.05, alpha=0.005, iter=40):
+    criterion = nn.MSELoss().cuda()
+    X = denorm(X_nat.clone())
+
+    pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda()
+
+    for i in range(iter):
+        pert_a = pert_a.detach().requires_grad_(True)
+
+        X_lab = rgb2lab(X).cuda()
+        X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert_a
+        X_lab = torch.clamp(X_lab, min=-128, max=128)
+        X_new = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])(lab2rgb(X_lab))
+
+        with torch.no_grad():
+            gen_noattack, _ = model(X_nat, c_trg[i % len(c_trg)])
+
+        gen_adv, _ = model(X_new, c_trg[i % len(c_trg)])
+        loss = criterion(gen_adv, gen_noattack)
+        if torch.isnan(loss):
+            print(f"Iteration {i}: NaN detected in loss. Exiting loop.")
+            break
+        loss.backward()
+
+        with torch.no_grad():
+            pert_a = pert_a + alpha * pert_a.grad.sign()
+            pert_a = torch.clamp(pert_a, min=-epsilon, max=epsilon)
+
+    with torch.no_grad():
+        X_lab_final = rgb2lab(X).cuda()
+        X_lab_final[:, 1:, :, :] = X_lab_final[:, 1:, :, :] + pert_a
+        X_lab_final = torch.clamp(X_lab_final, min=-128, max=128)
+        X_adv = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])(lab2rgb(X_lab_final))
+
+    return X_adv, X_adv - X

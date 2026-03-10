@@ -11,7 +11,7 @@ from color_space import *
 from data_loader import get_loader
 from utils import *
 
-from model import Generator, Discriminator
+from model.stargan import Generator, Discriminator
 from mpi4py import MPI
 import time
 
