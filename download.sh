@@ -31,7 +31,20 @@ elif [ $FILE == 'pretrained-celeba-256x256' ]; then
     unzip $ZIP_FILE -d ./stargan_celeba_256/models/
     rm $ZIP_FILE
 
+elif [ $FILE == 'simswap-weights' ]; then
+
+    # SimSwap: ArcFace checkpoint
+    mkdir -p ./SimSwap/arcface_model
+    wget -P ./SimSwap/arcface_model \
+        https://github.com/neuralchen/SimSwap/releases/download/1.0/arcface_checkpoint.tar
+
+    # SimSwap: Generator checkpoint (224x224)
+    wget -O ./SimSwap/checkpoints.zip \
+        https://github.com/neuralchen/SimSwap/releases/download/1.0/checkpoints.zip
+    unzip ./SimSwap/checkpoints.zip -d ./SimSwap/checkpoints
+    rm ./SimSwap/checkpoints.zip
+
 else
-    echo "Available arguments are celeba, pretrained-celeba-128x128, pretrained-celeba-256x256."
+    echo "Available arguments are celeba, pretrained-celeba-128x128, pretrained-celeba-256x256, simswap-weights."
     exit 1
 fi
