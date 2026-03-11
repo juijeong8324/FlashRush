@@ -1,0 +1,3 @@
+[submodule "SimSwap"]
+	path = SimSwap
+	url = https://github.com/neuralchen/SimSwap.git
