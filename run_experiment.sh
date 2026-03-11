@@ -1,6 +1,9 @@
 #!/bin/bash
 
-SCRIPT=${1:-main}   # main | main2 | main3
+SCRIPT=${1:-main}          # main | main2 | main3
+ATTACK_TYPE=${2:-lab}      # lab | fgsm | pgd
+NUM_IMAGES=${3:-50}        # number of images to process
+ATTACK_ITERS=${4:-100}     # number of attack iterations
 
 # main은 baseline (MPI 없음), main2/main3은 MPI
 # 기존 뉴런환경과 비교하기 위함
@@ -11,10 +14,10 @@ else
 fi
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_DIR="./logs/${SCRIPT}_${TIMESTAMP}"
+LOG_DIR="./logs/${SCRIPT}_${ATTACK_TYPE}__${ATTACK_ITERS}"
 mkdir -p "$LOG_DIR"
 
-echo "실험: ${SCRIPT}.py | 로그: ${LOG_DIR}"
+echo "실험: ${SCRIPT}.py | attack_type: ${ATTACK_TYPE} | num_images: ${NUM_IMAGES} | attack_iters: ${ATTACK_ITERS} | 로그: ${LOG_DIR}"
 
 nvidia-smi \
   --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total \
@@ -31,9 +34,11 @@ $RUN_PREFIX ${SCRIPT}.py \
   --c_dim 5 \
   --selected_attrs Black_Hair Blond_Hair Brown_Hair Male Young \
   --model_save_dir='stargan_celeba_256/models' \
-  --result_dir="./results/${SCRIPT}" \
+  --result_dir="./results/${SCRIPT}_${ATTACK_TYPE}_${NUM_IMAGES}_${ATTACK_ITERS}" \
   --test_iters 200000 \
-  --attack_iters 100 \
+  --attack_type ${ATTACK_TYPE} \
+  --num_images ${NUM_IMAGES} \
+  --attack_iters ${ATTACK_ITERS} \
   --batch_size 1 \
   > "${LOG_DIR}/result.txt" 2>&1
 
