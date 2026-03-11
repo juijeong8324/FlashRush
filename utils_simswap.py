@@ -91,7 +91,7 @@ def lab_attack_simswap(X_nat, targets, model, epsilon=0.05, iter=100):
     """
     criterion = nn.MSELoss().cuda()
     pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda().requires_grad_(True)
-    optimizer = torch.optim.Adam([pert_a], lr=1e-2, betas=(0.9, 0.999))
+    optimizer = torch.optim.Adam([pert_a], lr=1e-3, betas=(0.9, 0.999))
 
     X = denorm_imagenet(X_nat)   # [0, 1]
 
