@@ -47,6 +47,10 @@ def main():
     parser.add_argument('--batch_size', type=int,
                         default=1, help='mini-batch size')
     parser.add_argument('--attack_iters', type=int, default=100)
+    parser.add_argument('--attack_type', type=str, default='lab',
+                        choices=['lab', 'fgsm', 'pgd', 'fgsm_rgb', 'pgd_rgb'])
+    parser.add_argument('--num_images', type=int, default=50,
+                        help='number of images to process')
 
     parser.add_argument('--resume_iters', type=int,
                         default=200000, help='resume training from this step')
@@ -157,7 +161,7 @@ def main():
         result_path = os.path.join(
             config.result_dir, '{}-images.jpg'.format(i + 1))
         save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
-        if i >= 1:  # stop after this many images
+        if i >= config.num_images - 1:  # stop after this many images
             break
 
     print(f"************LAB Attack & Calulate {rank}: {time.time() - t_loop}")
