@@ -118,8 +118,10 @@ def main():
     parser.add_argument('--epsilon', type=float, default=0.05)
     parser.add_argument('--num_id_images', type=int, default=50,
                         help='Number of identity images to attack')
-    parser.add_argument('--num_target_images', type=int, default=5,
+    parser.add_argument('--num_target_images', type=int, default=1,
                         help='Number of fixed target faces used per identity image')
+    parser.add_argument('--target_image', type=str, default=None,
+                        help='Path to a single target image (overrides num_target_images)')
 
     # Output
     parser.add_argument('--result_dir', type=str, default='./results_simswap')
@@ -142,17 +144,26 @@ def main():
     )
 
     # Identity images to attack: dataset[0 : num_id_images]
-    id_subset     = data.Subset(dataset, range(config.num_id_images))
-    # Target faces (fixed): dataset[num_id_images : num_id_images + num_target_images]
-    target_subset = data.Subset(dataset, range(config.num_id_images,
-                                               config.num_id_images + config.num_target_images))
+    id_subset = data.Subset(dataset, range(config.num_id_images))
+    id_loader = data.DataLoader(id_subset, batch_size=1, shuffle=False,
+                                num_workers=config.num_workers)
 
-    id_loader     = data.DataLoader(id_subset,     batch_size=1, shuffle=False,
-                                    num_workers=config.num_workers)
-    target_loader = data.DataLoader(target_subset, batch_size=1, shuffle=False,
-                                    num_workers=config.num_workers)
+    # Target face(s)
+    if config.target_image is not None:
+        transform_target = T.Compose([
+            T.CenterCrop(178),
+            T.Resize((config.image_size, config.image_size)),
+            T.ToTensor(),
+        ])
+        target_img = transform_target(Image.open(config.target_image).convert('RGB'))
+        targets = [target_img.unsqueeze(0).cuda()]
+    else:
+        target_subset = data.Subset(dataset, range(config.num_id_images,
+                                                   config.num_id_images + config.num_target_images))
+        target_loader = data.DataLoader(target_subset, batch_size=1, shuffle=False,
+                                        num_workers=config.num_workers)
+        targets = [target.cuda() for _, target in target_loader]
 
-    targets = [target.cuda() for _, target in target_loader]
     print(f'Dataset loaded in {time.time()-t:.1f}s, '
           f'{len(targets)} target faces collected')
 

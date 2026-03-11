@@ -2,13 +2,13 @@
 
 ATTACK_TYPE=${1:-lab}      # lab | fgsm | pgd | fgsm_lab | pgd_lab
 NUM_IMAGES=${2:-50}        # number of identity images to attack
-NUM_TARGETS=${3:-5}        # number of fixed target faces
+TARGET_IMAGE=${3:-SimSwap/demo_file/Iron_man.jpg}
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_DIR="./logs/simswap_${ATTACK_TYPE}_${NUM_IMAGES}"
 mkdir -p "$LOG_DIR"
 
-echo "실험: main_simswap.py | attack_type: ${ATTACK_TYPE} | num_images: ${NUM_IMAGES} | num_targets: ${NUM_TARGETS} | 로그: ${LOG_DIR}"
+echo "실험: main_simswap.py | attack_type: ${ATTACK_TYPE} | num_images: ${NUM_IMAGES} | target: ${TARGET_IMAGE} | 로그: ${LOG_DIR}"
 
 nvidia-smi \
   --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total \
@@ -27,7 +27,7 @@ python3 main_simswap.py \
   --result_dir       "./results/simswap_${ATTACK_TYPE}_${NUM_IMAGES}" \
   --attack_type      ${ATTACK_TYPE} \
   --num_id_images    ${NUM_IMAGES} \
-  --num_target_images ${NUM_TARGETS} \
+  --target_image     ${TARGET_IMAGE} \
   > "${LOG_DIR}/result.txt" 2>&1
 
 kill $GPU_PID $CPU_PID 2>/dev/null
