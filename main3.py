@@ -132,29 +132,30 @@ def main():
 
         x_fake_list.append(x_adv)
 
-        for idx, c_trg in enumerate(c_trg_list):
-            print('GPU', gpu_id, 'image', i, 'class', idx)
-            with torch.no_grad():
-                x_real_mod = x_real
-                gen_noattack, gen_noattack_feats = G(x_real_mod, c_trg)
+        if rank == 0:
+            for idx, c_trg in enumerate(c_trg_list):
+                print('GPU', gpu_id, 'image', i, 'class', idx)
+                with torch.no_grad():
+                    x_real_mod = x_real
+                    gen_noattack, gen_noattack_feats = G(x_real_mod, c_trg)
 
-            # Metrics
-            with torch.no_grad():
-                gen, _ = G(x_adv, c_trg)
-                # Add to lists
-                x_fake_list.append(gen_noattack)
-                x_fake_list.append(gen)
+                # Metrics
+                with torch.no_grad():
+                    gen, _ = G(x_adv, c_trg)
+                    # Add to lists
+                    x_fake_list.append(gen_noattack)
+                    x_fake_list.append(gen)
 
-                l2_error += F.mse_loss(gen, gen_noattack)
+                    l2_error += F.mse_loss(gen, gen_noattack)
 
-                ssim_local, psnr_local = compare(
-                    denorm(gen), denorm(gen_noattack))
-                ssim += ssim_local
-                psnr += psnr_local
+                    ssim_local, psnr_local = compare(
+                        denorm(gen), denorm(gen_noattack))
+                    ssim += ssim_local
+                    psnr += psnr_local
 
-                if F.mse_loss(gen, gen_noattack) > 0.05:
-                    n_dist += 1
-                n_samples += 1
+                    if F.mse_loss(gen, gen_noattack) > 0.05:
+                        n_dist += 1
+                    n_samples += 1
 
         # Save the translated images (rank 0 only).
         if rank == 0:

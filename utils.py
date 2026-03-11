@@ -210,7 +210,6 @@ def lab_attack3(X_nat, c_trg, device, model, epsilon=0.05, iter=100):
     t_bcast = time.time()
     if rank == 0:
         avg_pert = np.sum(all_pert, axis=0)
-        print(avg_pert)
     else:
         avg_pert = None
     avg_pert = comm.bcast(avg_pert, root=0)
