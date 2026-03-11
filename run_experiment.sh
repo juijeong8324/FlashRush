@@ -1,13 +1,13 @@
 #!/bin/bash
 
-SCRIPT=${1:-main}          # main | main2 | main3
+SCRIPT=${1:-main}          # main | main_batch | main2 | main3
 ATTACK_TYPE=${2:-lab}      # lab | fgsm | pgd
 NUM_IMAGES=${3:-50}        # number of images to process
 ATTACK_ITERS=${4:-100}     # number of attack iterations
+BATCH_SIZE=${5:-1}         # batch size (main_batch용)
 
-# main은 baseline (MPI 없음), main2/main3은 MPI
-# 기존 뉴런환경과 비교하기 위함
-if [ "$SCRIPT" = "main" ]; then
+# main/main_batch은 baseline (MPI 없음), main2/main3은 MPI
+if [ "$SCRIPT" = "main" ] || [ "$SCRIPT" = "main_batch" ]; then
     RUN_PREFIX="taskset -c 0,1 python3"
 else
     RUN_PREFIX="taskset -c 0,1 mpirun -np 2 python3"
@@ -39,7 +39,7 @@ $RUN_PREFIX ${SCRIPT}.py \
   --attack_type ${ATTACK_TYPE} \
   --num_images ${NUM_IMAGES} \
   --attack_iters ${ATTACK_ITERS} \
-  --batch_size 1 \
+  --batch_size ${BATCH_SIZE} \
   > "${LOG_DIR}/result.txt" 2>&1
 
 kill $GPU_PID $CPU_PID 2>/dev/null

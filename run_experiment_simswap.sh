@@ -21,7 +21,7 @@ CPU_PID=$!
 
 python3 main_simswap.py \
   --arc_path SimSwap/arcface_model/arcface_checkpoint.tar \
-  --epsilon 2.0 \
+  --epsilon 0.5 \
   --G_path   SimSwap/checkpoints/people/latest_net_G.pth \
   --celeba_image_dir ./data/celeba/images \
   --attr_path        ./data/celeba/list_attr_celeba.txt \
