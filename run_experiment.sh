@@ -14,7 +14,7 @@ else
 fi
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_DIR="./logs/${SCRIPT}_${ATTACK_TYPE}__${ATTACK_ITERS}"
+LOG_DIR="./logs/${SCRIPT}_${ATTACK_TYPE}_${ATTACK_ITERS}"
 mkdir -p "$LOG_DIR"
 
 echo "실험: ${SCRIPT}.py | attack_type: ${ATTACK_TYPE} | num_images: ${NUM_IMAGES} | attack_iters: ${ATTACK_ITERS} | 로그: ${LOG_DIR}"

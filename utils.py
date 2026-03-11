@@ -229,6 +229,52 @@ def lab_attack3(X_nat, c_trg, device, model, epsilon=0.05, iter=100):
 
 
 
+def fgsm_attack(X_nat, c_trg, model, epsilon=0.05):
+    criterion = nn.MSELoss().cuda()
+
+    X_adv = X_nat.clone().detach().requires_grad_(True)
+
+    with torch.no_grad():
+        gen_noattack, _ = model(X_nat, c_trg[0])
+
+    gen_adv, _ = model(X_adv, c_trg[0])
+    loss = criterion(gen_adv, gen_noattack)
+    loss.backward()
+
+    with torch.no_grad():
+        X_adv = X_nat + epsilon * X_adv.grad.sign()
+        X_adv = torch.clamp(X_adv, -1, 1)
+
+    return X_adv, X_adv - X_nat
+
+
+def pgd_attack(X_nat, c_trg, model, epsilon=0.05, alpha=0.005, iter=40):
+    criterion = nn.MSELoss().cuda()
+
+    X_adv = X_nat.clone().detach()
+
+    for i in range(iter):
+        X_adv = X_adv.detach().requires_grad_(True)
+
+        with torch.no_grad():
+            gen_noattack, _ = model(X_nat, c_trg[i % len(c_trg)])
+
+        gen_adv, _ = model(X_adv, c_trg[i % len(c_trg)])
+        loss = criterion(gen_adv, gen_noattack)
+        if torch.isnan(loss):
+            print(f"Iteration {i}: NaN detected in loss. Exiting loop.")
+            break
+        loss.backward()
+
+        with torch.no_grad():
+            X_adv = X_adv + alpha * X_adv.grad.sign()
+            X_adv = torch.clamp(X_adv, -1, 1)
+            # epsilon ball 유지
+            X_adv = torch.clamp(X_adv, X_nat - epsilon, X_nat + epsilon)
+
+    return X_adv, X_adv - X_nat
+
+
 def fgsm_lab_attack(X_nat, c_trg, model, epsilon=0.05):
     criterion = nn.MSELoss().cuda()
     X = denorm(X_nat.clone())

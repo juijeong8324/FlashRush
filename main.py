@@ -30,7 +30,7 @@ def main():
     # Data configuration.
     parser.add_argument('--batch_size', type=int, default=1, help='mini-batch size')
     parser.add_argument('--attack_iters', type=int, default=100)
-    parser.add_argument('--attack_type', type=str, default='lab', choices=['lab', 'fgsm', 'pgd'])
+    parser.add_argument('--attack_type', type=str, default='lab', choices=['lab', 'fgsm', 'pgd', 'fgsm_rgb', 'pgd_rgb'])
 
     parser.add_argument('--resume_iters', type=int, default=200000, help='resume training from this step')
     parser.add_argument('--selected_attrs', '--list', nargs='+', help='selected attributes for the CelebA dataset',
@@ -89,6 +89,10 @@ def main():
             x_adv, pert = fgsm_lab_attack(x_real, c_trg_list, G, epsilon=0.05)
         elif config.attack_type == 'pgd':
             x_adv, pert = pgd_lab_attack(x_real, c_trg_list, G, epsilon=0.05)
+        elif config.attack_type == 'fgsm_rgb':
+            x_adv, pert = fgsm_attack(x_real, c_trg_list, G, epsilon=0.05)
+        elif config.attack_type == 'pgd_rgb':
+            x_adv, pert = pgd_attack(x_real, c_trg_list, G, epsilon=0.05)
         else:
             x_adv, pert = lab_attack(x_real, c_trg_list, G, iter=config.attack_iters)
         print(f"************{config.attack_type.upper()} Attack {i}th: {time.time() - t}")
