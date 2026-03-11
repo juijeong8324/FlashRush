@@ -156,11 +156,12 @@ def main():
                     n_dist += 1
                 n_samples += 1
 
-        # Save the translated images.
-        x_concat = torch.cat(x_fake_list, dim=3)
-        result_path = os.path.join(
-            config.result_dir, '{}-images.jpg'.format(i + 1))
-        save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
+        # Save the translated images (rank 0 only).
+        if rank == 0:
+            x_concat = torch.cat(x_fake_list, dim=3)
+            result_path = os.path.join(
+                config.result_dir, '{}-images.jpg'.format(i + 1))
+            save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
         if i >= config.num_images - 1:  # stop after this many images
             break
 
