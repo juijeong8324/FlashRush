@@ -2,9 +2,9 @@
 Anti-forgery adversarial attack against SimSwap (face swap model).
 
 Attack scenario:
-  - Victim's identity photos are perturbed in LAB space.
-  - When an attacker uses these protected photos as the identity source,
-    ArcFace extracts a distorted identity → the face swap output is degraded.
+  - CelebA 이미지 (img_att) = 섭동 추가 대상 (face를 바꿀 대상, appearance base)
+  - target 이미지 (img_id)  = face를 주입할 identity source (e.g. 6.jpg)
+  - model(img_id=target, img_att=celeba_adv) → swap 결과가 degraded
 
 Usage example:
   python main_simswap.py \
@@ -14,7 +14,7 @@ Usage example:
       --attr_path        ./data/celeba/list_attr_celeba.txt \
       --result_dir       ./results_simswap \
       --num_id_images    50 \
-      --num_target_images 5 \
+      --target_image     SimSwap/crop_224/6.jpg \
       --attack_iters     100 \
       --attack_type      lab
 """
@@ -47,26 +47,25 @@ from model.simswap_wrapper import SimSwapWrapper
 # ── Data loader ───────────────────────────────────────────────────────────────
 
 class CelebASimSwap(data.Dataset):
-    """CelebA loader with dual normalization for SimSwap.
+    """CelebA loader for SimSwap appearance base (img_att).
 
     Returns:
-        img_id : ImageNet-normalized [3, H, W]  (identity source = victim's face)
-        target : [0, 1]-normalized   [3, H, W]  (target face to swap onto)
+        img_att_norm : ImageNet-normalized [3, H, W]  (unused, kept for compat)
+        img_att_01   : [0, 1]-normalized   [3, H, W]  (섭동 대상 = appearance base)
 
-    Note: attribute labels are not used for SimSwap — only image filenames matter.
     Same shuffle seed as the original CelebA loader for consistent test split.
     """
     def __init__(self, image_dir, attr_path, image_size=224, mode='test'):
         self.image_dir = image_dir
         self.mode = mode
 
-        self.transform_id = T.Compose([
+        self.transform_norm = T.Compose([
             T.CenterCrop(178),
             T.Resize((image_size, image_size)),
             T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
-        self.transform_target = T.Compose([
+        self.transform_01 = T.Compose([
             T.CenterCrop(178),
             T.Resize((image_size, image_size)),
             T.ToTensor(),
@@ -89,7 +88,7 @@ class CelebASimSwap(data.Dataset):
 
     def __getitem__(self, index):
         img = Image.open(os.path.join(self.image_dir, self.dataset[index])).convert('RGB')
-        return self.transform_id(img), self.transform_target(img)
+        return self.transform_norm(img), self.transform_01(img)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -117,11 +116,11 @@ def main():
     parser.add_argument('--attack_iters', type=int, default=100)
     parser.add_argument('--epsilon', type=float, default=0.05)
     parser.add_argument('--num_id_images', type=int, default=50,
-                        help='Number of identity images to attack')
+                        help='Number of CelebA appearance images to attack')
     parser.add_argument('--num_target_images', type=int, default=1,
-                        help='Number of fixed target faces used per identity image')
+                        help='Number of identity source images (used if --target_image not set)')
     parser.add_argument('--target_image', type=str, default=None,
-                        help='Path to a single target image (overrides num_target_images)')
+                        help='Path to a single identity source image (img_id)')
 
     # Output
     parser.add_argument('--result_dir', type=str, default='./results_simswap')
@@ -143,102 +142,105 @@ def main():
         image_size=config.image_size, mode='test',
     )
 
-    # Identity images to attack: dataset[0 : num_id_images]
+    # CelebA = appearance base (img_att), [0,1] version used
     id_subset = data.Subset(dataset, range(config.num_id_images))
     id_loader = data.DataLoader(id_subset, batch_size=1, shuffle=False,
                                 num_workers=config.num_workers)
 
-    # Target face(s)
+    # Identity source (img_id): ImageNet-normalized
     if config.target_image is not None:
-        transform_target = T.Compose([
-            T.CenterCrop(178),
+        transform_imgid = T.Compose([
             T.Resize((config.image_size, config.image_size)),
             T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
-        target_img = transform_target(Image.open(config.target_image).convert('RGB'))
+        target_img = transform_imgid(Image.open(config.target_image).convert('RGB'))
         targets = [target_img.unsqueeze(0).cuda()]
     else:
         target_subset = data.Subset(dataset, range(config.num_id_images,
                                                    config.num_id_images + config.num_target_images))
         target_loader = data.DataLoader(target_subset, batch_size=1, shuffle=False,
                                         num_workers=config.num_workers)
-        targets = [target.cuda() for _, target in target_loader]
+        targets = [img_norm.cuda() for img_norm, _ in target_loader]
 
     print(f'Dataset loaded in {time.time()-t:.1f}s, '
-          f'{len(targets)} target faces collected')
+          f'{len(targets)} identity source(s) collected')
+
+    # ── Precompute ArcFace features for identity sources ───────────────────────
+    target_feats = []
+    with torch.no_grad():
+        for target in targets:
+            t112 = F.interpolate(target, size=(112, 112), mode='bilinear', align_corners=False)
+            feat = model.netArc(t112)
+            feat = feat / feat.norm(dim=1, keepdim=True)
+            target_feats.append(feat)
 
     # ── Attack loop ────────────────────────────────────────────────────────────
     # Metrics:
-    #   l2_error     : MSE(gen_clean, gen_adv)                 — output distortion (↑ better)
-    #   ssim/psnr    : SSIM/PSNR(gen_clean, gen_adv)           — output distortion (↓ better)
-    #   id_sim_clean : cosine_sim(arc(gen_clean), arc(img_id)) — baseline identity transfer
-    #   id_sim_adv   : cosine_sim(arc(gen_adv),   arc(img_id)) — identity after attack (↓ better)
-    #   id_drop      : id_sim_clean - id_sim_adv               — identity disruption (↑ better)
-    #   ASR(MSE)     : % where MSE(gen_clean, gen_adv) > 0.05  — pixel-level distortion rate
-    #   ASR(ID)      : % where id_sim_adv < 0.5               — identity disruption rate
+    #   l2_error     : MSE(gen_clean, gen_adv)                    — output distortion (↑ better)
+    #   ssim/psnr    : SSIM/PSNR(gen_clean, gen_adv)              — output distortion (↓ better)
+    #   id_sim_clean : cosine_sim(arc(gen_clean), arc(target))    — baseline identity transfer
+    #   id_sim_adv   : cosine_sim(arc(gen_adv),   arc(target))    — identity after attack (↓ better)
+    #   id_drop      : id_sim_clean - id_sim_adv                  — identity disruption (↑ better)
+    #   ASR(MSE)     : % where MSE(gen_clean, gen_adv) > 0.05     — pixel-level distortion rate
+    #   ASR(ID)      : % where id_sim_adv < 0.5                   — identity disruption rate
     l2_error = 0.0
     ssim_total, psnr_total = 0.0, 0.0
     id_sim_clean_total, id_sim_adv_total = 0.0, 0.0
     n_samples, n_asr_mse, n_asr_id = 0, 0, 0
-    ASR_MSE_THRESHOLD = 0.05   # same as StarGAN baseline
-    ASR_ID_THRESHOLD  = 0.5    # standard face recognition threshold
+    ASR_MSE_THRESHOLD = 0.05
+    ASR_ID_THRESHOLD  = 0.5
 
     t_loop = time.time()
 
-    for i, (img_id, _) in enumerate(id_loader):
-        img_id = img_id.cuda()
+    for i, (_, img_att) in enumerate(id_loader):
+        img_att = img_att.cuda()  # [0,1] CelebA appearance base
 
         t = time.time()
         if config.attack_type == 'lab':
-            img_adv, pert = lab_attack_simswap(img_id, targets, model,
+            img_adv, _ = lab_attack_simswap(img_att, targets, model,
                                                 epsilon=config.epsilon,
                                                 iter=config.attack_iters)
         elif config.attack_type == 'fgsm_lab':
-            img_adv, pert = fgsm_lab_attack_simswap(img_id, targets, model,
+            img_adv, _ = fgsm_lab_attack_simswap(img_att, targets, model,
                                                       epsilon=config.epsilon)
         elif config.attack_type == 'pgd_lab':
-            img_adv, pert = pgd_lab_attack_simswap(img_id, targets, model,
+            img_adv, _ = pgd_lab_attack_simswap(img_att, targets, model,
                                                     epsilon=config.epsilon,
                                                     iter=config.attack_iters)
         elif config.attack_type == 'fgsm':
-            img_adv, pert = fgsm_attack_simswap(img_id, targets, model,
+            img_adv, _ = fgsm_attack_simswap(img_att, targets, model,
                                                   epsilon=config.epsilon)
         else:  # pgd
-            img_adv, pert = pgd_attack_simswap(img_id, targets, model,
+            img_adv, pert = pgd_attack_simswap(img_att, targets, model,
                                                 epsilon=config.epsilon,
                                                 iter=config.attack_iters)
         print(f'[{i+1}] {config.attack_type.upper()} attack: {time.time()-t:.1f}s')
 
-        # ── Precompute ArcFace features for img_id and img_adv ─────────────────
-        with torch.no_grad():
-            img_id_112  = F.interpolate(img_id,  size=(112, 112), mode='bilinear', align_corners=False)
-            img_adv_112 = F.interpolate(img_adv, size=(112, 112), mode='bilinear', align_corners=False)
-            feat_id  = model.netArc(img_id_112)
-            feat_adv = model.netArc(img_adv_112)
-            feat_id  = feat_id  / feat_id.norm(dim=1, keepdim=True)
-            feat_adv = feat_adv / feat_adv.norm(dim=1, keepdim=True)
+        # ── Evaluate across identity sources ────────────────────────────────────
+        # Result grid per row: [img_att | img_adv | target | gen_clean | gen_adv]
+        frames = [img_att, img_adv]
 
-        # ── Evaluate across target faces ────────────────────────────────────────
-        # Result grid per row: [img_id | img_adv | target | gen_clean | gen_adv]
-        frames = [denorm_imagenet(img_id), denorm_imagenet(img_adv)]
-
-        for target in targets:
+        for target, feat_target in zip(targets, target_feats):
             with torch.no_grad():
-                gen_clean, _ = model(img_id,  target)   # [0, 1]
-                gen_adv,   _ = model(img_adv, target)   # [0, 1]
+                gen_clean, _ = model(target, img_att)   # [0, 1]
+                gen_adv,   _ = model(target, img_adv)   # [0, 1]
 
-                # Identity similarity: how much of img_id's identity survived in swap
-                gen_clean_112 = F.interpolate(gen_clean, size=(112, 112), mode='bilinear', align_corners=False)
-                gen_adv_112   = F.interpolate(gen_adv,   size=(112, 112), mode='bilinear', align_corners=False)
+                # Identity similarity: target's identity in the swap output
+                # ArcFace expects ImageNet-normalized input → normalize [0,1] outputs first
+                gen_clean_norm = normalize_imagenet(gen_clean.clamp(0, 1))
+                gen_adv_norm   = normalize_imagenet(gen_adv.clamp(0, 1))
+                gen_clean_112 = F.interpolate(gen_clean_norm, size=(112, 112), mode='bilinear', align_corners=False)
+                gen_adv_112   = F.interpolate(gen_adv_norm,   size=(112, 112), mode='bilinear', align_corners=False)
                 feat_clean_out = model.netArc(gen_clean_112)
                 feat_adv_out   = model.netArc(gen_adv_112)
                 feat_clean_out = feat_clean_out / feat_clean_out.norm(dim=1, keepdim=True)
                 feat_adv_out   = feat_adv_out   / feat_adv_out.norm(dim=1, keepdim=True)
 
-                id_sim_clean = (feat_id * feat_clean_out).sum(dim=1).item()
-                id_sim_adv   = (feat_id * feat_adv_out).sum(dim=1).item()
+                id_sim_clean = (feat_target * feat_clean_out).sum(dim=1).item()
+                id_sim_adv   = (feat_target * feat_adv_out).sum(dim=1).item()
 
-            frames.extend([target, gen_clean, gen_adv])
+            frames.extend([denorm_imagenet(target), gen_clean, gen_adv])
 
             l2_error       += F.mse_loss(gen_adv, gen_clean).item()
             ssim_v, psnr_v  = compare(gen_adv.clamp(0, 1), gen_clean.clamp(0, 1))
@@ -252,7 +254,7 @@ def main():
                 n_asr_id += 1
             n_samples += 1
 
-        # Save: [img_id | img_adv | target1 | clean1 | adv1 | target2 | ...]
+        # Save: [img_att | img_adv | target | gen_clean | gen_adv | ...]
         x_concat = torch.cat(frames, dim=3)
         save_path = os.path.join(config.result_dir, f'{i+1:04d}-images.jpg')
         save_image(x_concat.data.cpu().clamp(0, 1), save_path, nrow=1, padding=0)

@@ -1,17 +1,13 @@
 """
 Attack utility functions adapted for SimSwap.
 
-Key difference from utils.py (StarGAN):
-- StarGAN uses [-1, 1] normalization   → denorm = (x+1)/2
-- SimSwap img_id uses ImageNet stats   → denorm = x * std + mean
-
 Attack scenario:
-  X_nat    : ImageNet-normalized img_id [B, 3, H, W]  (victim's identity photo)
-  targets  : list of [0,1]-normalized target tensors   (various target faces)
-  model    : SimSwapWrapper
+  X_nat   : [0,1]-normalized img_att [B, 3, H, W]  (victim's face = appearance base, 섭동 대상)
+  targets : list of ImageNet-normalized img_id tensors  (face to inject = identity source)
+  model   : SimSwapWrapper
 
-The attack maximizes MSE(G(X_adv, target), G(X_nat, target)) averaged over all
-targets, so the perturbation is effective regardless of which target is used.
+model(img_id=target, img_att=X_nat) → swapped face with target's identity on X_nat's appearance.
+The attack maximizes MSE(G(target, X_adv), G(target, X_nat)) so the swap is degraded.
 """
 
 import torch
@@ -72,12 +68,15 @@ def compare(img1: torch.Tensor, img2: torch.Tensor):
 # ── Loss helper ───────────────────────────────────────────────────────────────
 
 def _avg_loss_over_targets(X_adv, X_nat, targets, model, criterion):
-    """Average MSE loss over all targets: mean_t[ MSE(G(X_adv,t), G(X_nat,t)) ]"""
+    """Average MSE loss over all targets: mean_t[ MSE(G(t, X_adv), G(t, X_nat)) ]
+    targets: ImageNet-normalized img_id (identity source)
+    X_nat/X_adv: [0,1] img_att (appearance base)
+    """
     loss = 0.0
     for target in targets:
         with torch.no_grad():
-            gen_clean, _ = model(X_nat, target)
-        gen_adv, _ = model(X_adv, target)
+            gen_clean, _ = model(target, X_nat)
+        gen_adv, _ = model(target, X_adv)
         loss = loss + criterion(gen_adv, gen_clean)
     return loss / len(targets)
 
@@ -85,23 +84,23 @@ def _avg_loss_over_targets(X_adv, X_nat, targets, model, criterion):
 # ── Attack functions ──────────────────────────────────────────────────────────
 
 def lab_attack_simswap(X_nat, targets, model, epsilon=0.05, iter=100):
-    """LAB-space iterative attack on SimSwap identity source.
+    """LAB-space iterative attack on SimSwap appearance base (img_att).
 
-    Loss is averaged over all targets each iteration.
+    X_nat   : [0,1] CelebA image (img_att, 섭동 대상)
+    targets : ImageNet-normalized identity source images (img_id)
     """
     criterion = nn.MSELoss().cuda()
     pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda().requires_grad_(True)
     optimizer = torch.optim.Adam([pert_a], lr=1e-4, betas=(0.9, 0.999))
 
-    X = denorm_imagenet(X_nat)   # [0, 1]
+    X = X_nat  # already [0, 1]
 
     for i in range(iter):
         X_lab = rgb2lab(X).cuda()
         pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
         X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert
         X_lab = torch.clamp(X_lab, min=-128, max=128)
-        X_new_01 = lab2rgb(X_lab)
-        X_new = norm_imagenet(X_new_01)
+        X_new = lab2rgb(X_lab)  # [0, 1]
 
         loss = -_avg_loss_over_targets(X_new, X_nat, targets, model, criterion)
         if torch.isnan(loss):
@@ -114,13 +113,13 @@ def lab_attack_simswap(X_nat, targets, model, epsilon=0.05, iter=100):
             pert_a.grad = torch.nan_to_num(pert_a.grad, nan=0.0)
         optimizer.step()
 
-    return X_new, X_new_01 - X
+    return X_new, X_new - X
 
 
 def fgsm_lab_attack_simswap(X_nat, targets, model, epsilon=0.05):
-    """Single-step FGSM in LAB space for SimSwap. Loss averaged over all targets."""
+    """Single-step FGSM in LAB space for SimSwap. X_nat is [0,1] img_att."""
     criterion = nn.MSELoss().cuda()
-    X = denorm_imagenet(X_nat)
+    X = X_nat  # already [0, 1]
 
     pert_a = torch.empty(
         X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]
@@ -130,8 +129,7 @@ def fgsm_lab_attack_simswap(X_nat, targets, model, epsilon=0.05):
     pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
     X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert
     X_lab = torch.clamp(X_lab, min=-128, max=128)
-    X_new_01 = lab2rgb(X_lab)
-    X_new = norm_imagenet(X_new_01)
+    X_new = lab2rgb(X_lab)  # [0, 1]
 
     loss = _avg_loss_over_targets(X_new, X_nat, targets, model, criterion)
     loss.backward()
@@ -142,16 +140,15 @@ def fgsm_lab_attack_simswap(X_nat, targets, model, epsilon=0.05):
         X_lab_final = rgb2lab(X).cuda()
         X_lab_final[:, 1:, :, :] = X_lab_final[:, 1:, :, :] + pert_final
         X_lab_final = torch.clamp(X_lab_final, min=-128, max=128)
-        X_adv_01 = lab2rgb(X_lab_final)
-        X_adv = norm_imagenet(X_adv_01)
+        X_adv = lab2rgb(X_lab_final)  # [0, 1]
 
-    return X_adv, X_adv_01 - X
+    return X_adv, X_adv - X
 
 
 def pgd_lab_attack_simswap(X_nat, targets, model, epsilon=0.05, alpha=0.005, iter=40):
-    """Multi-step PGD in LAB space for SimSwap. Loss averaged over all targets."""
+    """Multi-step PGD in LAB space for SimSwap. X_nat is [0,1] img_att."""
     criterion = nn.MSELoss().cuda()
-    X = denorm_imagenet(X_nat)
+    X = X_nat  # already [0, 1]
 
     pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda()
 
@@ -161,8 +158,7 @@ def pgd_lab_attack_simswap(X_nat, targets, model, epsilon=0.05, alpha=0.005, ite
         X_lab = rgb2lab(X).cuda()
         X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert_a
         X_lab = torch.clamp(X_lab, min=-128, max=128)
-        X_new_01 = lab2rgb(X_lab)
-        X_new = norm_imagenet(X_new_01)
+        X_new = lab2rgb(X_lab)  # [0, 1]
 
         loss = _avg_loss_over_targets(X_new, X_nat, targets, model, criterion)
         if torch.isnan(loss):
@@ -178,14 +174,13 @@ def pgd_lab_attack_simswap(X_nat, targets, model, epsilon=0.05, alpha=0.005, ite
         X_lab_final = rgb2lab(X).cuda()
         X_lab_final[:, 1:, :, :] = X_lab_final[:, 1:, :, :] + pert_a
         X_lab_final = torch.clamp(X_lab_final, min=-128, max=128)
-        X_adv_01 = lab2rgb(X_lab_final)
-        X_adv = norm_imagenet(X_adv_01)
+        X_adv = lab2rgb(X_lab_final)  # [0, 1]
 
-    return X_adv, X_adv_01 - X
+    return X_adv, X_adv - X
 
 
 def fgsm_attack_simswap(X_nat, targets, model, epsilon=0.05):
-    """Single-step FGSM in RGB space for SimSwap. Loss averaged over all targets."""
+    """Single-step FGSM in RGB space for SimSwap. X_nat is [0,1] img_att."""
     criterion = nn.MSELoss().cuda()
     X_adv = X_nat.clone().detach().requires_grad_(True)
 
@@ -193,15 +188,13 @@ def fgsm_attack_simswap(X_nat, targets, model, epsilon=0.05):
     loss.backward()
 
     with torch.no_grad():
-        X_adv = X_nat + epsilon * X_adv.grad.sign()
-        X_adv_01 = denorm_imagenet(X_adv).clamp(0, 1)
-        X_adv = norm_imagenet(X_adv_01)
+        X_adv = (X_nat + epsilon * X_adv.grad.sign()).clamp(0, 1)
 
-    return X_adv, denorm_imagenet(X_adv) - denorm_imagenet(X_nat)
+    return X_adv, X_adv - X_nat
 
 
 def pgd_attack_simswap(X_nat, targets, model, epsilon=0.05, alpha=0.005, iter=40):
-    """Multi-step PGD in RGB space for SimSwap. Loss averaged over all targets."""
+    """Multi-step PGD in RGB space for SimSwap. X_nat is [0,1] img_att."""
     criterion = nn.MSELoss().cuda()
     X_adv = X_nat.clone().detach()
 
@@ -216,9 +209,6 @@ def pgd_attack_simswap(X_nat, targets, model, epsilon=0.05, alpha=0.005, iter=40
 
         with torch.no_grad():
             X_adv = X_adv + alpha * X_adv.grad.sign()
-            X_adv_01 = denorm_imagenet(X_adv).clamp(0, 1)
-            X_nat_01 = denorm_imagenet(X_nat)
-            X_adv_01 = torch.clamp(X_adv_01, X_nat_01 - epsilon, X_nat_01 + epsilon).clamp(0, 1)
-            X_adv = norm_imagenet(X_adv_01)
+            X_adv = torch.clamp(X_adv, X_nat - epsilon, X_nat + epsilon).clamp(0, 1)
 
-    return X_adv, denorm_imagenet(X_adv) - denorm_imagenet(X_nat)
+    return X_adv, X_adv - X_nat

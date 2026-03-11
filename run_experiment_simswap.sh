@@ -2,7 +2,7 @@
 
 ATTACK_TYPE=${1:-lab}      # lab | fgsm | pgd | fgsm_lab | pgd_lab
 NUM_IMAGES=${2:-50}        # number of identity images to attack
-TARGET_IMAGE=${3:-SimSwap/demo_file/Iron_man.jpg}
+TARGET_IMAGE=${3:-SimSwap/crop_224/6.jpg}
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_DIR="./logs/simswap_${ATTACK_TYPE}_${NUM_IMAGES}"
@@ -21,6 +21,7 @@ CPU_PID=$!
 
 python3 main_simswap.py \
   --arc_path SimSwap/arcface_model/arcface_checkpoint.tar \
+  --epsilon 2.0 \
   --G_path   SimSwap/checkpoints/people/latest_net_G.pth \
   --celeba_image_dir ./data/celeba/images \
   --attr_path        ./data/celeba/list_attr_celeba.txt \
