@@ -1,5 +1,6 @@
 """
 Anti-forgery adversarial attack against SimSwap (face swap model).
+MPI distributed version (main_simswap2.py) — based on main2.py pattern.
 
 Attack scenario:
   - CelebA 이미지 (img_id) = 섭동 추가 대상 (victim의 identity photo)
@@ -7,12 +8,12 @@ Attack scenario:
   - 공격: ArcFace가 CelebA에서 잘못된 identity 추출 → swap 결과 degraded
 
 Usage example:
-  python main_simswap.py \
+  mpirun -np 2 python main_simswap2.py \
       --arc_path SimSwap/arcface_model/arcface_checkpoint.tar \
       --G_path   SimSwap/checkpoints/people/latest_net_G.pth \
       --celeba_image_dir ./data/celeba/images \
       --attr_path        ./data/celeba/list_attr_celeba.txt \
-      --result_dir       ./results_simswap \
+      --result_dir       ./results_simswap2 \
       --num_id_images    50 \
       --target_image     SimSwap/crop_224/6.jpg \
       --attack_iters     100 \
@@ -31,13 +32,15 @@ from torchvision import transforms as T
 from torchvision.utils import save_image
 from PIL import Image
 from torch.utils import data
+from mpi4py import MPI
+
+# Initialize MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
 
 from utils_simswap import (
-    lab_attack_simswap,
-    fgsm_lab_attack_simswap,
-    pgd_lab_attack_simswap,
-    fgsm_attack_simswap,
-    pgd_attack_simswap,
+    lab_attack_simswap2,
     denorm_imagenet,
     normalize_imagenet,
     compare,
@@ -81,7 +84,8 @@ class CelebASimSwap(data.Dataset):
         random.seed(1234)
         random.shuffle(filenames)
         self.dataset = filenames[:2000] if self.mode == 'test' else filenames[2000:]
-        print(f'CelebASimSwap: loaded {len(self.dataset)} images ({self.mode})')
+        if rank == 0:
+            print(f'CelebASimSwap: loaded {len(self.dataset)} images ({self.mode})')
 
     def __len__(self):
         return len(self.dataset)
@@ -111,8 +115,6 @@ def main():
     parser.add_argument('--num_workers', type=int, default=0)
 
     # Attack
-    parser.add_argument('--attack_type', type=str, default='lab',
-                        choices=['lab', 'fgsm', 'pgd', 'fgsm_lab', 'pgd_lab'])
     parser.add_argument('--attack_iters', type=int, default=100)
     parser.add_argument('--epsilon', type=float, default=2.0)
     parser.add_argument('--num_id_images', type=int, default=50,
@@ -123,17 +125,23 @@ def main():
                         help='Path to a single target body image (img_att)')
 
     # Output
-    parser.add_argument('--result_dir', type=str, default='./results_simswap')
+    parser.add_argument('--result_dir', type=str, default='./results_simswap2')
 
     config = parser.parse_args()
     os.makedirs(config.result_dir, exist_ok=True)
 
+    # ── CUDA 할당 ──────────────────────────────────────────────────────────────
+    num_gpus = torch.cuda.device_count()
+    gpu_id = rank % num_gpus
+    torch.cuda.set_device(gpu_id)
+
     # ── Load SimSwap model ─────────────────────────────────────────────────────
-    print(f'Loading SimSwap... (ArcFace: {config.arc_path}, G: {config.G_path})')
+    if rank == 0:
+        print(f'Loading SimSwap... (ArcFace: {config.arc_path}, G: {config.G_path})')
     t = time.time()
     model = SimSwapWrapper.load(config.arc_path, config.G_path, config.crop_size)
-    model.cuda().eval()
-    print(f'Model loaded in {time.time()-t:.1f}s')
+    model.to(gpu_id).eval()
+    print(f'Rank {rank} using GPU {gpu_id}: Model loaded in {time.time()-t:.1f}s')
 
     # ── Load dataset ───────────────────────────────────────────────────────────
     t = time.time()
@@ -154,16 +162,17 @@ def main():
             T.ToTensor(),
         ])
         target_img = transform_att(Image.open(config.target_image).convert('RGB'))
-        targets = [target_img.unsqueeze(0).cuda()]
+        targets = [target_img.unsqueeze(0).cuda(gpu_id)]
     else:
         target_subset = data.Subset(dataset, range(config.num_id_images,
                                                    config.num_id_images + config.num_target_images))
         target_loader = data.DataLoader(target_subset, batch_size=1, shuffle=False,
                                         num_workers=config.num_workers)
-        targets = [img_01.cuda() for _, img_01 in target_loader]
+        targets = [img_01.cuda(gpu_id) for _, img_01 in target_loader]
 
-    print(f'Dataset loaded in {time.time()-t:.1f}s, '
-          f'{len(targets)} target body image(s) collected')
+    if rank == 0:
+        print(f'Dataset loaded in {time.time()-t:.1f}s, '
+              f'{len(targets)} target body image(s) collected')
 
     # ── Attack loop ────────────────────────────────────────────────────────────
     # Metrics:
@@ -184,28 +193,18 @@ def main():
     t_loop = time.time()
 
     for i, (img_id, _) in enumerate(id_loader):
-        img_id = img_id.cuda()  # ImageNet-normalized CelebA (img_id)
+        # Distribute tasks by rank
+        if i % size != rank:
+            continue
+
+        print(f'Rank {rank} using GPU {gpu_id}: Image {i}')
+
+        img_id = img_id.cuda(gpu_id)  # ImageNet-normalized CelebA (img_id)
 
         t = time.time()
-        if config.attack_type == 'lab':
-            img_adv, _ = lab_attack_simswap(img_id, targets, model,
-                                             epsilon=config.epsilon,
-                                             iter=config.attack_iters)
-        elif config.attack_type == 'fgsm_lab':
-            img_adv, _ = fgsm_lab_attack_simswap(img_id, targets, model,
-                                                   epsilon=config.epsilon)
-        elif config.attack_type == 'pgd_lab':
-            img_adv, _ = pgd_lab_attack_simswap(img_id, targets, model,
-                                                  epsilon=config.epsilon,
-                                                  iter=config.attack_iters)
-        elif config.attack_type == 'fgsm':
-            img_adv, _ = fgsm_attack_simswap(img_id, targets, model,
-                                               epsilon=config.epsilon)
-        else:  # pgd
-            img_adv, _ = pgd_attack_simswap(img_id, targets, model,
-                                              epsilon=config.epsilon,
-                                              iter=config.attack_iters)
-        print(f'[{i+1}] {config.attack_type.upper()} attack: {time.time()-t:.1f}s')
+        img_adv, _ = lab_attack_simswap2(img_id, targets, model, gpu_id, epsilon=config.epsilon, iter=config.attack_iters)
+
+        print(f'Rank {rank} GPU {gpu_id}: [{i+1}] {config.attack_type.upper()} attack: {time.time()-t:.1f}s')
 
         # ── Precompute ArcFace features for img_id and img_adv ─────────────────
         with torch.no_grad():
@@ -240,13 +239,14 @@ def main():
 
             frames.extend([target, gen_clean, gen_adv])
 
-            l2_error       += F.mse_loss(gen_adv, gen_clean).item() # 이거 수정해야 함... 
+            mse_val = F.mse_loss(gen_adv, gen_clean).item()
+            l2_error       += mse_val
             ssim_v, psnr_v  = compare(gen_adv.clamp(0, 1), gen_clean.clamp(0, 1))
             ssim_total     += ssim_v
             psnr_total     += psnr_v
             id_sim_clean_total += id_sim_clean
             id_sim_adv_total   += id_sim_adv
-            if F.mse_loss(gen_adv, gen_clean) > ASR_MSE_THRESHOLD:
+            if mse_val > ASR_MSE_THRESHOLD:
                 n_asr_mse += 1
             if id_sim_adv < ASR_ID_THRESHOLD:
                 n_asr_id += 1
@@ -257,19 +257,35 @@ def main():
         save_path = os.path.join(config.result_dir, f'{i+1:04d}-images.jpg')
         save_image(x_concat.data.cpu().clamp(0, 1), save_path, nrow=1, padding=0)
 
-    print(f'\nTotal attack loop: {time.time()-t_loop:.1f}s')
-    print(f'{n_samples} pairs | '
-          f'L2: {l2_error/n_samples:.4f} | '
-          f'SSIM: {ssim_total/n_samples:.4f} | '
-          f'PSNR: {psnr_total/n_samples:.2f} | '
-          f'ID sim (clean): {id_sim_clean_total/n_samples:.4f} | '
-          f'ID sim (adv): {id_sim_adv_total/n_samples:.4f} | '
-          f'ID drop: {(id_sim_clean_total-id_sim_adv_total)/n_samples:.4f} | '
-          f'ASR(MSE): {n_asr_mse/n_samples:.3f} | '
-          f'ASR(ID): {n_asr_id/n_samples:.3f}')
+    print(f'Rank {rank} GPU {gpu_id}: Attack loop done in {time.time()-t_loop:.1f}s')
+
+    # ── Merge Metrics via MPI ──────────────────────────────────────────────────
+    t_mpi = time.time()
+    total_l2_error        = comm.reduce(l2_error,          op=MPI.SUM, root=0)
+    total_ssim            = comm.reduce(ssim_total,        op=MPI.SUM, root=0)
+    total_psnr            = comm.reduce(psnr_total,        op=MPI.SUM, root=0)
+    total_id_sim_clean    = comm.reduce(id_sim_clean_total,op=MPI.SUM, root=0)
+    total_id_sim_adv      = comm.reduce(id_sim_adv_total,  op=MPI.SUM, root=0)
+    total_n_samples       = comm.reduce(n_samples,         op=MPI.SUM, root=0)
+    total_n_asr_mse       = comm.reduce(n_asr_mse,         op=MPI.SUM, root=0)
+    total_n_asr_id        = comm.reduce(n_asr_id,          op=MPI.SUM, root=0)
+
+    print(f'Rank {rank}: MPI communication done in {time.time()-t_mpi:.1f}s')
+
+    if rank == 0:
+        n = total_n_samples
+        print(f'\n{n} pairs | '
+              f'L2: {total_l2_error/n:.4f} | '
+              f'SSIM: {total_ssim/n:.4f} | '
+              f'PSNR: {total_psnr/n:.2f} | '
+              f'ID sim (clean): {total_id_sim_clean/n:.4f} | '
+              f'ID sim (adv): {total_id_sim_adv/n:.4f} | '
+              f'ID drop: {(total_id_sim_clean-total_id_sim_adv)/n:.4f} | '
+              f'ASR(MSE): {total_n_asr_mse/n:.3f} | '
+              f'ASR(ID): {total_n_asr_id/n:.3f}')
 
 
 if __name__ == '__main__':
     start = time.time()
     main()
-    print(f'\nTotal: {time.time()-start:.1f}s')
+    print(f'Rank {rank}: Total {time.time()-start:.1f}s')

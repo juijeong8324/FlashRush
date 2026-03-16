@@ -169,11 +169,12 @@ def main():
     print(f"************LAB Attack & Calulate {rank}: {time.time() - t_loop}")
 
     # Print metrics
-    print('{} images.L2 error: {}. ssim: {}. psnr: {}. n_dist: {}'.format(n_samples,
-                                                                          l2_error / n_samples,
-                                                                          ssim / n_samples,
-                                                                          psnr / n_samples,
-                                                                          float(n_dist) / n_samples))
+    if rank == 0:
+        print('{} images.L2 error: {}. ssim: {}. psnr: {}. n_dist: {}'.format(n_samples,
+                                                                              l2_error / n_samples,
+                                                                              ssim / n_samples,
+                                                                              psnr / n_samples,
+                                                                              float(n_dist) / n_samples))
 
 
 if __name__ == '__main__':

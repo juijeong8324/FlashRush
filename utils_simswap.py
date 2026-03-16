@@ -19,6 +19,8 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from skimage.transform import resize
 
 from color_space import rgb2lab, lab2rgb
+from mpi4py import MPI
+import time
 
 # ── ImageNet normalization helpers ────────────────────────────────────────────
 
@@ -116,109 +118,92 @@ def lab_attack_simswap(X_nat, targets, model, epsilon=0.05, iter=100):
 
     return X_new, X_new_01 - X
 
+def lab_attack_simswap2(X_nat, targets, model, device, epsilon=0.05, iter=100):
+    criterion = nn.MSELoss().to(device)
+    pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).to(device).requires_grad_(True)
+    optimizer = torch.optim.Adam([pert_a], lr=1e-3, betas=(0.9, 0.999))
 
-def fgsm_lab_attack_simswap(X_nat, targets, model, epsilon=0.05):
-    """Single-step FGSM in LAB space for SimSwap."""
-    criterion = nn.MSELoss().cuda()
-    X = denorm_imagenet(X_nat)
-
-    pert_a = torch.empty(
-        X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]
-    ).cuda().uniform_(-epsilon, epsilon).requires_grad_(True)
-
-    X_lab = rgb2lab(X).cuda()
-    pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
-    X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert
-    X_lab = torch.clamp(X_lab, min=-128, max=128)
-    X_new_01 = lab2rgb(X_lab)
-    X_new = norm_imagenet(X_new_01)
-
-    loss = _avg_loss_over_targets(X_new, X_nat, targets, model, criterion)
-    loss.backward()
-
-    with torch.no_grad():
-        pert_sign  = epsilon * pert_a.grad.sign()
-        pert_final = torch.clamp(pert_a.detach() + pert_sign, min=-epsilon, max=epsilon)
-        X_lab_final = rgb2lab(X).cuda()
-        X_lab_final[:, 1:, :, :] = X_lab_final[:, 1:, :, :] + pert_final
-        X_lab_final = torch.clamp(X_lab_final, min=-128, max=128)
-        X_adv_01 = lab2rgb(X_lab_final)
-        X_adv = norm_imagenet(X_adv_01)
-
-    return X_adv, X_adv_01 - X
-
-
-def pgd_lab_attack_simswap(X_nat, targets, model, epsilon=0.05, alpha=0.05, iter=40):
-    """Multi-step PGD in LAB space for SimSwap."""
-    criterion = nn.MSELoss().cuda()
-    X = denorm_imagenet(X_nat)
-
-    pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda()
+    X = denorm_imagenet(X_nat)   # [0, 1]
 
     for i in range(iter):
-        pert_a = pert_a.detach().requires_grad_(True)
-
-        X_lab = rgb2lab(X).cuda()
-        X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert_a
+        X_lab = rgb2lab(X).to(device)
+        pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
+        X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert
         X_lab = torch.clamp(X_lab, min=-128, max=128)
         X_new_01 = lab2rgb(X_lab)
         X_new = norm_imagenet(X_new_01)
 
-        loss = _avg_loss_over_targets(X_new, X_nat, targets, model, criterion)
+        loss = -_avg_loss_over_targets(X_new, X_nat, targets, model, criterion)
         if torch.isnan(loss):
             print(f"Iteration {i}: NaN in loss. Stopping.")
             break
+
+        optimizer.zero_grad()
         loss.backward()
+        if torch.isnan(pert_a.grad).any():
+            pert_a.grad = torch.nan_to_num(pert_a.grad, nan=0.0)
+        torch.nn.utils.clip_grad_norm_([pert_a], max_norm=1.0)
+        optimizer.step()
 
-        with torch.no_grad():
-            pert_a = pert_a + alpha * pert_a.grad.sign()
-            pert_a = torch.clamp(pert_a, min=-epsilon, max=epsilon)
-
-    with torch.no_grad():
-        X_lab_final = rgb2lab(X).cuda()
-        X_lab_final[:, 1:, :, :] = X_lab_final[:, 1:, :, :] + pert_a
-        X_lab_final = torch.clamp(X_lab_final, min=-128, max=128)
-        X_adv_01 = lab2rgb(X_lab_final)
-        X_adv = norm_imagenet(X_adv_01)
-
-    return X_adv, X_adv_01 - X
+    return X_new, X_new_01 - X
 
 
-def fgsm_attack_simswap(X_nat, targets, model, epsilon=0.05):
-    """Single-step FGSM in RGB space for SimSwap."""
-    criterion = nn.MSELoss().cuda()
-    X_adv = X_nat.clone().detach().requires_grad_(True)
+def lab_attack_simswap3(X_nat, targets, model, device, epsilon=0.05, iter=100):
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
 
-    loss = _avg_loss_over_targets(X_adv, X_nat, targets, model, criterion)
-    loss.backward()
+    criterion = nn.MSELoss().to(device)
+    pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).to(device).requires_grad_(True)
+    optimizer = torch.optim.Adam([pert_a], lr=1e-3, betas=(0.9, 0.999))
 
-    with torch.no_grad():
-        X_adv = X_nat + epsilon * X_adv.grad.sign()
-        X_adv_01 = denorm_imagenet(X_adv).clamp(0, 1)
-        X_adv = norm_imagenet(X_adv_01)
-
-    return X_adv, denorm_imagenet(X_adv) - denorm_imagenet(X_nat)
-
-
-def pgd_attack_simswap(X_nat, targets, model, epsilon=0.05, alpha=0.005, iter=40):
-    """Multi-step PGD in RGB space for SimSwap."""
-    criterion = nn.MSELoss().cuda()
-    X_adv = X_nat.clone().detach()
+    X = denorm_imagenet(X_nat)   # [0, 1]
 
     for i in range(iter):
-        X_adv = X_adv.detach().requires_grad_(True)
+        if i % size != rank:
+            continue
 
-        loss = _avg_loss_over_targets(X_adv, X_nat, targets, model, criterion)
+        X_lab = rgb2lab(X).to(device)
+        pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
+        X_lab[:, 1:, :, :] = X_lab[:, 1:, :, :] + pert
+        X_lab = torch.clamp(X_lab, min=-128, max=128)
+        X_new_01 = lab2rgb(X_lab)
+        X_new = norm_imagenet(X_new_01)
+
+        loss = -_avg_loss_over_targets(X_new, X_nat, targets, model, criterion)
         if torch.isnan(loss):
             print(f"Iteration {i}: NaN in loss. Stopping.")
             break
+
+        optimizer.zero_grad()
         loss.backward()
+        if torch.isnan(pert_a.grad).any():
+            pert_a.grad = torch.nan_to_num(pert_a.grad, nan=0.0)
+        torch.nn.utils.clip_grad_norm_([pert_a], max_norm=1.0)
+        optimizer.step()
 
-        with torch.no_grad():
-            X_adv = X_adv + alpha * X_adv.grad.sign()
-            X_adv_01 = denorm_imagenet(X_adv).clamp(0, 1)
-            X_nat_01 = denorm_imagenet(X_nat)
-            X_adv_01 = torch.clamp(X_adv_01, X_nat_01 - epsilon, X_nat_01 + epsilon).clamp(0, 1)
-            X_adv = norm_imagenet(X_adv_01)
+    # ── MPI Gather → sum → Bcast ───────────────────────────────────────────────
+    pert_a_cpu = pert_a.detach().cpu().numpy()
+    all_pert = np.empty((size, *pert_a_cpu.shape), dtype=pert_a_cpu.dtype) if rank == 0 else None
 
-    return X_adv, denorm_imagenet(X_adv) - denorm_imagenet(X_nat)
+    t_gather = time.time()
+    comm.Gather(pert_a_cpu, all_pert, root=0)
+    print(f"MPI Gather rank{rank}: {time.time()-t_gather:.3f}s")
+
+    t_bcast = time.time()
+    avg_pert = np.sum(all_pert, axis=0) if rank == 0 else None
+    avg_pert = comm.bcast(avg_pert, root=0)
+    print(f"MPI Bcast  rank{rank}: {time.time()-t_bcast:.3f}s")
+
+    avg_pert = torch.tensor(avg_pert).to(device)
+
+    # Reapply final averaged perturbation
+    X_lab_final = rgb2lab(X).to(device)
+    pert_final = torch.clamp(avg_pert, min=-epsilon, max=epsilon)
+    X_lab_final[:, 1:, :, :] = X_lab_final[:, 1:, :, :] + pert_final
+    X_lab_final = torch.clamp(X_lab_final, min=-128, max=128)
+    X_new_01_final = lab2rgb(X_lab_final)
+    X_new_final = norm_imagenet(X_new_01_final)
+
+    return X_new_final, X_new_01_final - X
+
